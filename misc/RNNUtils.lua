@@ -1,3 +1,5 @@
+glove = require '../glove/glove'
+
 
 --------UTIL FUNCTIONS---------------
 --Takes a table and return a table which swaps key and value
@@ -59,6 +61,18 @@ function right_align(seq,lengths)
 	end
 	return v;
 end
+function glove_encode(words,dict_table)
+	local len = words:size(1)
+	local out = torch.CudaTensor(len,300):fill(0)
+	local str
+	local tmp
+	for i=1,len do
+		str = dict_table[ tostring(words[i]) ]
+		out[i]= glove:word2vec(str)
+		--print("str = ", str, ", tensor sum = ", tmp:sum() )
+	end
+	return out
+end
 
 
 -------RNN UTIL FUNCTIONS-----------
@@ -84,6 +98,7 @@ if opt.gpuid >= 0 then
 	function sort_encoding_onehot_right_align(batch_word_right_align,batch_length,vocabulary_size)
 		--batch_word_right_align: batch_size x MAX_LENGTH matrix, words are right aligned.
 		--batch_length: batch_size x 1 matrix depicting actual length
+		print("onehot: input1 size = ", batch_word_right_align:size())
 		local batch_length_sorted,sort_index=torch.sort(batch_length,true);
 		local sort_index_inverse=inverse_mapping(sort_index);
 		local D=batch_word_right_align:size(2);
@@ -100,6 +115,48 @@ if opt.gpuid >= 0 then
 			cnt=cnt+n;
 		end
 		return {onehot_cuda(words,vocabulary_size),batch_sizes,sort_index,sort_index_inverse};	
+	end
+
+	function sort_encoding_glove_right_align(dict_table,batch_word_right_align,batch_length,vocabulary_size)
+		--batch_word_right_align: batch_size x MAX_LENGTH matrix, words are right aligned.
+		--batch_length: batch_size x 1 matrix depicting actual length
+		local batch_length_sorted,sort_index=torch.sort(batch_length,true);
+		local sort_index_inverse=inverse_mapping(sort_index);
+		local D=batch_word_right_align:size(2);
+		local L=batch_length_sorted[1];
+		local batch_word_right_align_t=batch_word_right_align:index(1,sort_index):cuda():t()[{{D-L+1,D}}];
+		local words=torch.LongTensor(torch.sum(batch_length)):cuda();
+		local batch_sizes=torch.LongTensor(L);
+		local cnt=0;
+		for i=1,L do
+			local ind=batch_length_sorted:ge(L-i+1);
+			local n=torch.sum(ind);
+			words[{{cnt+1,cnt+n}}]=batch_word_right_align_t[i][{{1,n}}];
+			batch_sizes[i]=n;
+			cnt=cnt+n;
+		end
+		return {glove_encode(words,dict_table),batch_sizes,sort_index,sort_index_inverse};	
+	end
+
+	function glove_encode_tmp(dict_table,ques_batch_tensor, ques_len_tensor, vocabulary_size)
+
+		local batchsize = ques_batch_tensor:size(1)
+		local max_len = ques_batch_tensor:size(2)
+		output = torch.Tensor(batchsize,26,300):fill(0)
+		print("glove_encode start, batchsize = ",batchsize,", max_len = ",max_len)
+		for i=1,batchsize do
+			ques = ques_batch_tensor[i]
+			len = ques_len_tensor[i]
+			print("len =", len, " question = ",  ques)
+			local vec_tmp
+			for j=max_len-len+1,max_len do
+				vec_tmp = glove:word2vec( dict_table[tostring(ques[j])] )
+				print("str = ",dict_table[tostring(ques[j])], ", tensor sum = ", vec_tmp:sum())
+				output[i][j]=vec_tmp
+			end
+		end
+		print("glove_encode end, output sum = ", output:sum())
+		return output
 	end
 else
 	function sort_encoding_onehot_right_align(batch_word_right_align,batch_length,vocabulary_size)
@@ -130,6 +187,7 @@ function rnn_forward(net_buffer,init_state,inputs,sizes)
 	local states={init_state[{{1,sizes[1]},{}}]};
 	local outputs={};
 	for i=1,N do
+		--print("rnn_forward, inputs[i] size = ", inputs[i]:size())
 		local tmp;
 		if i==1 or sizes[i]==sizes[i-1] then
 			tmp=net_buffer[1][i]:forward({states[i],inputs[i]});

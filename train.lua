@@ -30,7 +30,7 @@ cmd:option('-learning_rate_decay_start', -1, 'at what iteration to start decayin
 cmd:option('-learning_rate_decay_every', 50000, 'every how many iterations thereafter to drop LR by half?')
 cmd:option('-batch_size',500,'batch_size for each iterations')
 cmd:option('-max_iters', 150000, 'max number of iterations to run for ')
-cmd:option('-input_encoding_size', 200, 'he encoding size of each token in the vocabulary')
+cmd:option('-input_encoding_size', 300, 'he encoding size of each token in the vocabulary')
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
 cmd:option('-rnn_layer',2,'number of the rnn layer')
 cmd:option('-common_embedding_size', 1024, 'size of the common embedding vector')
@@ -196,7 +196,7 @@ function dataset:next_batch()
 	end
 
 
-	local fv_sorted_q=sort_encoding_onehot_right_align(dataset['question']:index(1,qinds),dataset['lengths_q']:index(1,qinds),vocabulary_size_q) 
+	local fv_sorted_q=sort_encoding_glove_right_align(json_file['ix_to_word'], dataset['question']:index(1,qinds),dataset['lengths_q']:index(1,qinds),vocabulary_size_q) 
 	local fv_im=dataset['fv_im']:index(1,iminds) 
 	local labels=dataset['answers']:index(1,qinds) 
 	
@@ -248,7 +248,8 @@ function JdJ(x)
 	local question_max_length=fv_sorted_q[2]:size(1) 
 
 	--embedding forward--
-	local word_embedding_q=split_vector(embedding_net_q:forward(fv_sorted_q[1]),fv_sorted_q[2]) 
+	--local word_embedding_q=split_vector(embedding_net_q:forward(fv_sorted_q[1]),fv_sorted_q[2]) 
+	local word_embedding_q=split_vector(fv_sorted_q[1], fv_sorted_q[2])
 
 	--encoder forward--
 	local states_q,junk2=rnn_forward(encoder_net_buffer_q,torch.repeatTensor(dummy_state_q:fill(0),batch_size,1),word_embedding_q,fv_sorted_q[2]) 
@@ -268,7 +269,7 @@ function JdJ(x)
 
 	--embedding backward--
 	dword_embedding_q=join_vector(dword_embedding_q) 
-	embedding_net_q:backward(fv_sorted_q[1],dword_embedding_q) 
+	--embedding_net_q:backward(fv_sorted_q[1],dword_embedding_q) 
 		
 	--summarize f and gradient
 	local encoder_adw_q=encoder_dw_q:clone():zero()
