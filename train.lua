@@ -6,6 +6,7 @@ require 'misc.netdef'
 require 'cutorch'
 require 'cunn'
 require 'hdf5'
+require 'loadcaffe'
 cjson=require('cjson') 
 LSTM=require 'misc.LSTM'
 
@@ -36,6 +37,8 @@ cmd:option('-rnn_layer',2,'number of the rnn layer')
 cmd:option('-common_embedding_size', 1024, 'size of the common embedding vector')
 cmd:option('-num_output', 1000, 'number of output answers')
 cmd:option('-img_norm', 1, 'normalize the image feature. 1 = normalize, 0 = not normalize')
+cmd:option('-cnn_proto', '', 'path to the cnn prototxt')
+cmd:option('-cnn_model', '', 'path to the cnn model')
 
 --check point
 cmd:option('-save_checkpoint_every', 25000, 'how often to save a model checkpoint?')
@@ -96,18 +99,22 @@ dataset['answers'] = h5_file:read('/answers'):all()
 h5_file:close()
 
 
+dataset['question'] = right_align(dataset['question'],dataset['lengths_q'])
+
+
+--[[
 print('DataLoader loading h5 file: ', opt.input_img_h5)
+
 local h5_file = hdf5.open(opt.input_img_h5, 'r')
 dataset['fv_im'] = h5_file:read('/images_train'):all()
 h5_file:close()
-
-dataset['question'] = right_align(dataset['question'],dataset['lengths_q'])
 
 -- Normalize the image feature
 if opt.img_norm == 1 then
 	local nm=torch.sqrt(torch.sum(torch.cmul(dataset['fv_im'],dataset['fv_im']),2)) 
 	dataset['fv_im']=torch.cdiv(dataset['fv_im'],torch.repeatTensor(nm,1,4096)):float() 
 end
+]]--
 
 local count = 0
 for i, w in pairs(json_file['ix_to_word']) do count = count + 1 end
@@ -119,6 +126,9 @@ collectgarbage()
 --Design Parameters and Network Definitions
 ------------------------------------------------------------------------
 print('Building the model...')
+
+--Load CNN model from pertrained CaffeModel
+cnnmodel=loadcaffe.load(opt.cnn_proto, opt.cnn_model,opt.backend);
 
 buffer_size_q=dataset['question']:size()[2]
 
@@ -158,14 +168,21 @@ if opt.gpuid >= 0 then
 end
 
 --Processings
+--Load trained LSTM parameters
 embedding_w_q,embedding_dw_q=embedding_net_q:getParameters() 
-embedding_w_q:uniform(-0.08, 0.08) 
+--embedding_w_q:uniform(-0.08, 0.08) 
 
 encoder_w_q,encoder_dw_q=encoder_net_q:getParameters() 
-encoder_w_q:uniform(-0.08, 0.08) 
+--encoder_w_q:uniform(-0.08, 0.08) 
 
 multimodal_w,multimodal_dw=multimodal_net:getParameters() 
-multimodal_w:uniform(-0.08, 0.08) 
+--multimodal_w:uniform(-0.08, 0.08) 
+--
+
+model_param=torch.load('./model/lstm.t7');
+embedding_w_q:copy(model_param['embedding_w_q']);
+encoder_w_q:copy(model_param['encoder_w_q']);
+multimodal_w:copy(model_param['multimodal_w']);
 
 sizes={encoder_w_q:size(1),embedding_w_q:size(1),multimodal_w:size(1)} 
 
@@ -179,6 +196,25 @@ optimize.update_grad_per_n_batches=1
 optimize.winit=join_vector({encoder_w_q,embedding_w_q,multimodal_w}) 
 
 
+--Image loader for CNN
+function loadim(imname)
+    im=image.load(imname)
+    im=image.scale(im,224,224)
+    if im:size(1)==1 then
+        im2=torch.cat(im,im,1)
+        im2=torch.cat(im2,im,1)
+        im=im2
+    elseif im:size(1)==4 then
+        im=im[{{1,3},{},{}}]
+    end
+    im=im*255;
+    im2=im:clone()
+    im2[{{3},{},{}}]=im[{{1},{},{}}]-123.68
+    im2[{{2},{},{}}]=im[{{2},{},{}}]-116.779
+    im2[{{1},{},{}}]=im[{{3},{},{}}]-103.939
+    return im2
+end
+
 ------------------------------------------------------------------------
 -- Next batch for train
 ------------------------------------------------------------------------
@@ -190,9 +226,11 @@ function dataset:next_batch()
 	local nqs=dataset['question']:size(1) 
 	-- we use the last val_num data for validation (the data already randomlized when created)
 
+	img = {}
 	for i=1,batch_size do
 		qinds[i]=torch.random(nqs) 
 		iminds[i]=dataset['img_list'][qinds[i]] 
+		img[i] = loadim(imname)
 	end
 
 
@@ -208,6 +246,10 @@ function dataset:next_batch()
 		fv_im = fv_im:cuda()
 		labels = labels:cuda()
 	end
+
+	--forward cnnmodel to get image features, rewrite fv_im(size: 500 x 4096)
+	fv_im = cnnmodel:forward(img)
+
 
 	return fv_sorted_q,fv_im, labels ,batch_size 
 end
@@ -262,8 +304,12 @@ function JdJ(x)
 	local dscores=criterion:backward(scores,labels) 
 
 	local tmp=multimodal_net:backward({tv_q,fv_im},dscores) 
-	local dtv_q=tmp[1]:index(1,fv_sorted_q[3]) 
-	
+
+	local dtv_img
+	cnnmodel:backward(dvt_img)
+
+--[[	Fix LSTM parameters
+	local dtv_q=tmp[1]:index(1,fv_sorted_q[3]) 	
 	--encoder backward
 	local junk4,dword_embedding_q=rnn_backward(encoder_net_buffer_q,dtv_q,dummy_output_q,states_q,word_embedding_q,fv_sorted_q[2]) 
 
@@ -271,6 +317,8 @@ function JdJ(x)
 	dword_embedding_q=join_vector(dword_embedding_q) 
 	--embedding_net_q:backward(fv_sorted_q[1],dword_embedding_q) 
 		
+]]--
+
 	--summarize f and gradient
 	local encoder_adw_q=encoder_dw_q:clone():zero()
 	for i=1,question_max_length do
